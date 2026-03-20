@@ -113,6 +113,15 @@ static bool parse_dat_handle(DatHandle* dh);
 static byte* get_dat_resource(DatHandle* dh, int index, dword* out_size);
 static int decompress_rle(byte* src, dword src_size, byte* dst, int dst_width, int dst_height);
 static bool load_level(int level);
+static void apply_palette(void);
+static void clear_screen(byte color);
+static void present(void);
+static void delay_ms(uint32_t ms);
+static void run_ani_command(int cmd, byte* data, int pos_in_block, int block_size);
+static Sprite get_sprite_22(int idx);
+static Sprite get_sprite_32(int idx);
+static int load_ani_cached(int resource_index);
+static void update_ani_frame(void);
 
 // ANI动画系统
 static byte ani_palette_buf[768];
@@ -320,6 +329,336 @@ static GameMachine g_machine;
 static RenderState g_render;
 static ResourceCache g_resources;
 static bool g_sdl_active = false;
+
+// 启动动画状态
+typedef struct {
+    int phase;
+    int frame_count;
+    int bar_offset;
+    int bar_loaded;
+    byte* bar_data;
+    int fade_level;
+    int current_res;
+    bool complete;
+} StartupAnimState;
+
+static StartupAnimState g_startup = {0};
+
+// 从FDOTHER.DAT绘制资源到屏幕 (raw 320x200 bitmap)
+static void draw_fdother_resource(int res_idx) {
+    if (!g_resources.fdother.data) return;
+    dword size;
+    byte* data = get_dat_resource(&g_resources.fdother, res_idx, &size);
+    if (data && size >= 64000) {
+        memcpy(g_render.screen_buffer, data, 64000);
+    }
+}
+
+// 设置游戏调色板 (从FDOTHER.DAT资源获取)
+static void set_game_palette(int res_idx) {
+    if (!g_resources.fdother.data) return;
+    dword size;
+    byte* pal = get_dat_resource(&g_resources.fdother, res_idx, &size);
+    if (pal && size >= 768) {
+        memcpy(g_resources.palette, pal, 768);
+        apply_palette();
+    }
+}
+
+// 加载FDOTHER.DAT资源数据
+static byte* load_fdother_resource(int res_idx, dword* out_size) {
+    if (!g_resources.fdother.data) return NULL;
+    dword size;
+    byte* data = get_dat_resource(&g_resources.fdother, res_idx, &size);
+    if (data && out_size) {
+        *out_size = size;
+        byte* copy = (byte*)malloc(size);
+        if (copy) memcpy(copy, data, size);
+        return copy;
+    }
+    return NULL;
+}
+
+// 绘制内存中的320x200位图到屏幕
+static void draw_bitmap_to_screen(byte* bitmap, int stride, int x, int y, int w, int h) {
+    if (!bitmap) return;
+    for (int dy = 0; dy < h; dy++) {
+        int src_y = dy;
+        int dst_y = y + dy;
+        if (dst_y < 0 || dst_y >= SCREEN_HEIGHT) continue;
+        for (int dx = 0; dx < w; dx++) {
+            int src_x = dx;
+            int dst_x = x + dx;
+            if (dst_x < 0 || dst_x >= SCREEN_WIDTH) continue;
+            byte color = bitmap[src_y * stride + src_x];
+            g_render.screen_buffer[dst_y * SCREEN_WIDTH + dst_x] = color;
+        }
+    }
+}
+
+// 从FDOTHER.DAT加载条形动画数据 (资源69-73, 每个147像素高)
+static bool load_bar_animation() {
+    if (g_startup.bar_loaded) return true;
+    
+    g_startup.bar_data = (byte*)malloc(5 * 147 * 320);
+    if (!g_startup.bar_data) return false;
+    
+    memset(g_startup.bar_data, 0, 5 * 147 * 320);
+    
+    for (int i = 0; i < 5; i++) {
+        dword size;
+        byte* data = load_fdother_resource(69 + i, &size);
+        if (data && size >= 320 * 147) {
+            memcpy(g_startup.bar_data + i * 147 * 320, data, 147 * 320);
+            free(data);
+        }
+    }
+    
+    g_startup.bar_loaded = 1;
+    return true;
+}
+
+// 绘制条形动画帧
+static void draw_bar_frame(int offset) {
+    if (!g_startup.bar_data) return;
+    
+    int src_y = offset;
+    int dst_y = 0;
+    
+    while (src_y < 5 * 147 && dst_y < SCREEN_HEIGHT) {
+        byte* src_row = g_startup.bar_data + src_y * 320;
+        byte* dst_row = g_render.screen_buffer + dst_y * SCREEN_WIDTH;
+        memcpy(dst_row, src_row, 320);
+        src_y++;
+        dst_y++;
+    }
+}
+
+// 播放ANI.DAT指定资源
+static int play_ani_resource(int res_idx, int frame_delay, int wait_key) {
+    FILE* fp = fopen("ANI.DAT", "rb");
+    if (!fp) return -1;
+    
+    fseek(fp, 4 * res_idx + 6, SEEK_SET);
+    dword offset;
+    if (fread(&offset, 4, 1, fp) != 1) { fclose(fp); return -1; }
+    
+    fseek(fp, offset, SEEK_SET);
+    byte header[173];
+    if (fread(header, 1, 173, fp) != 173) { fclose(fp); return -1; }
+    
+    word block_count = *(word*)(header + 165);
+    if (block_count <= 0) { fclose(fp); return -1; }
+    
+    printf("[启动] 播放ANI.DAT资源%d (%d帧, %dms/帧)\n", res_idx, block_count, frame_delay);
+    
+    for (int i = 0; i < block_count; i++) {
+        byte block_header[8];
+        if (fread(block_header, 1, 8, fp) != 8) break;
+        
+        word size = *(word*)(block_header + 0);
+        word cmd_count = *(word*)(block_header + 2);
+        
+        if (size == 0 || cmd_count == 0) continue;
+        
+        byte* block_data = (byte*)malloc(size);
+        if (!block_data) continue;
+        
+        if (fread(block_data, 1, size, fp) != (size_t)size) {
+            free(block_data);
+            continue;
+        }
+        
+        memset(ani_screen_buf, 0, 64000);
+        memset(ani_palette_buf, 0, 768);
+        
+        int pos = 0;
+        for (int c = 0; c < cmd_count && pos < size; c++) {
+            byte cmd = block_data[pos++];
+            if (cmd < 10) {
+                run_ani_command(cmd, block_data, pos, size);
+            }
+        }
+        
+        memcpy(g_render.screen_buffer, ani_screen_buf, 64000);
+        
+        if (g_resources.palette) {
+            memcpy(g_resources.palette, ani_palette_buf, 768);
+            apply_palette();
+        }
+        
+        delay_ms(frame_delay);
+        
+        if (wait_key) {
+#ifdef USE_SDL
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) {
+                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
+                    free(block_data);
+                    fclose(fp);
+                    return 1;
+                }
+            }
+#endif
+        }
+        
+        free(block_data);
+    }
+    
+    fclose(fp);
+    return 0;
+}
+
+// 简单启动动画 (对应sub_1F81E)
+static void simple_startup_animation(int res_idx, int delay_ms, int res_other) {
+    if (res_other != -1) {
+        clear_screen(0);
+        draw_fdother_resource(res_other);
+    }
+    play_ani_resource(res_idx, delay_ms, 0);
+}
+
+// 加载并显示FDOTHER资源动画 (对应sub_1F73F)
+static void load_show_fdother(int n5, int n100, int dst_y) {
+    clear_screen(0);
+    draw_fdother_resource(n5);
+    
+    dword size;
+    byte* data = load_fdother_resource(n100, &size);
+    if (data && size >= 64000) {
+        draw_bitmap_to_screen(data, 320, 0, 0, 320, 200);
+        free(data);
+    }
+    
+    draw_bar_frame(dst_y);
+}
+
+// 淡入淡出效果
+static void fade_effect(int start, int end, int frame_delay) {
+    for (int level = start; level >= end; level--) {
+        g_startup.fade_level = level;
+        delay_ms(frame_delay);
+    }
+    g_startup.fade_level = end;
+}
+
+// 完整的启动序列
+static void run_full_startup_sequence() {
+    printf("[启动] 开始完整启动序列...\n");
+    
+    memset(&g_startup, 0, sizeof(StartupAnimState));
+    g_startup.phase = 0;
+    g_startup.bar_offset = 535;
+    
+    // ===== Phase 0: 初始设置 =====
+    printf("[启动] Phase 0: 加载资源77\n");
+    draw_fdother_resource(77);
+    present();
+    delay_ms(100);
+    
+    // ===== Phase 1: 显示资源74 + ANI动画 =====
+    printf("[启动] Phase 1: 显示资源74 + ANI.DAT资源0\n");
+    clear_screen(0);
+    draw_fdother_resource(74);
+    present();
+    delay_ms(30);
+    
+    g_ani_res_idx = 0;
+    load_ani_cached(0);
+    g_ani_frame = 0;
+    for (int i = 0; i < 31 && g_ani_frame < g_ani_block_count; i++) {
+        update_ani_frame();
+        memcpy(g_render.screen_buffer, ani_screen_buf, 64000);
+        present();
+        delay_ms(60);
+        g_ani_frame++;
+    }
+    
+    // ===== Phase 2: 资源99 + ANI.DAT资源3 =====
+    printf("[启动] Phase 2: 资源99 + ANI.DAT资源3\n");
+    clear_screen(0);
+    draw_fdother_resource(99);
+    present();
+    delay_ms(100);
+    
+    play_ani_resource(3, 90, 1);
+    
+    clear_screen(0);
+    draw_fdother_resource(101);
+    present();
+    delay_ms(100);
+    
+    // ===== Phase 3: 条形动画 =====
+    printf("[启动] Phase 3: 条形动画 (535帧)\n");
+    load_bar_animation();
+    
+    for (int offset = 535; offset >= 0; offset--) {
+        clear_screen(0);
+        draw_bar_frame(offset);
+        
+        if (offset == 330 || offset == 210 || offset == 110 || offset == 25) {
+            draw_fdother_resource(102);
+            present();
+            delay_ms(30);
+            draw_fdother_resource(101);
+        } else if (offset == 450) {
+            draw_fdother_resource(100);
+        } else if (offset == 10) {
+            draw_fdother_resource(75);
+        }
+        
+        present();
+        delay_ms(30);
+        
+        if (offset == 0) {
+            delay_ms(1000);
+        }
+        
+#ifdef USE_SDL
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
+                g_startup.complete = true;
+                return;
+            }
+        }
+#endif
+    }
+    
+    if (g_startup.bar_data) {
+        free(g_startup.bar_data);
+        g_startup.bar_data = NULL;
+        g_startup.bar_loaded = 0;
+    }
+    
+    // ===== Phase 4: 淡出 =====
+    printf("[启动] Phase 4: 淡出效果\n");
+    fade_effect(40, 0, 8);
+    delay_ms(100);
+    
+    // ===== Phase 5: 关卡选择 =====
+    printf("[启动] Phase 5: 关卡选择画面\n");
+    clear_screen(0);
+    draw_fdother_resource(7);
+    draw_fdother_resource(8);
+    present();
+    delay_ms(100);
+    
+    play_ani_resource(1, 15, 1);
+    
+    clear_screen(0);
+    draw_fdother_resource(7);
+    set_game_palette(101);
+    present();
+    
+    fade_effect(0, 40, 8);
+    
+    // ===== Phase 6: 等待选择 =====
+    printf("[启动] Phase 6: 等待玩家选择\n");
+    
+    printf("[启动] 启动序列完成\n");
+    g_startup.complete = true;
+}
 
 // 初始化游戏机器
 static void init_game_machine(GameMachine* m) {
@@ -1210,7 +1549,11 @@ int main(int argc, char* argv[]) {
     printf("[游戏] 精灵: %d个(22x22), %d个(32x32)\n", 
            g_resources.sprite_count_22, g_resources.sprite_count_32);
     
-    // 加载ANI动画数据
+    // 运行完整的启动动画序列
+    printf("\n[游戏] 运行完整启动序列...\n");
+    run_full_startup_sequence();
+    
+    // 加载ANI动画数据用于游戏内动画
     printf("[游戏] 加载ANI动画...\n");
     g_ani_res_idx = 0;
     g_ani_frame = 0;
