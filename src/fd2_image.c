@@ -238,6 +238,27 @@ void render_indices_to_screen(byte* screen, int screen_w, int screen_h, int x, i
     image_free(img);
 }
 
+/* Helper to read 32-bit little-endian word safely from possibly unaligned data */
+static uint32_t le32(const byte* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static Image* image_decode_resource_by_type_old(const char* type, const byte* data, int size, const Palette* palette) {
+    if (!type || !data || size <= 0) return NULL;
+    if (strcmp(type, "FACE") == 0) {
+        return image_decode_face(data, size, palette);
+    } else if (strcmp(type, "BG") == 0) {
+        return image_decode_bg(data, size, palette);
+    } else if (strcmp(type, "BMP") == 0) {
+        // BMP header: 4 bytes width, 4 bytes height, followed by raw pixel indices
+        if (size < 8) return NULL;
+        int width = (int)le32(data);
+        int height = (int)le32(data + 4);
+        return image_decode_bmp(data + 8, width, height, palette);
+    }
+    return NULL;
+}
+
 Image* image_decode_resource_by_type(const char* type, const byte* data, int size, const Palette* palette) {
     if (!type || !data || size <= 0) return NULL;
     if (strcmp(type, "FACE") == 0) {
