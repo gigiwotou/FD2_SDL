@@ -482,7 +482,7 @@ void update_game(GameState* state) {
 void render_game(GameState* state) {
     // Phase-2: render current map as an index-based image if available
     map_render_current_map_to_screen(state->screen_buffer, SCREEN_WIDTH, SCREEN_HEIGHT);
-    #if ENABLE_MAP_INDEX_RENDER
+#if ENABLE_MAP_INDEX_RENDER
     {
         // Phase-3: render a small test overlay using direct index data for demonstration
         // Simple 4x4 checkerboard of palette indices

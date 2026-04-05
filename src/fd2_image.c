@@ -238,6 +238,20 @@ void render_indices_to_screen(byte* screen, int screen_w, int screen_h, int x, i
     image_free(img);
 }
 
+Image* image_decode_resource_by_type(const char* type, const byte* data, int size, const Palette* palette) {
+    if (!type || !data || size <= 0) return NULL;
+    if (strcmp(type, "FACE") == 0) {
+        return image_decode_face(data, size, palette);
+    } else if (strcmp(type, "BG") == 0) {
+        return image_decode_bg(data, size, palette);
+    } else if (strcmp(type, "BMP") == 0) {
+        // Best-effort: attempt as BMP, width/height must be encoded in data header per actual format
+        // If not decodable, return NULL
+        return image_decode_bmp(data, 0, 0, palette);
+    }
+    return NULL;
+}
+
 Image* image_index_alloc(int width, int height) {
     if (width <= 0 || height <= 0) return NULL;
     Image* img = (Image*)malloc(sizeof(Image));

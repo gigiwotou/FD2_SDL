@@ -145,4 +145,7 @@ Image* image_from_indices(const byte* indices, int width, int height);
 /* Render a raw palette-index buffer directly to screen (no intermediate Image) */
 void render_indices_to_screen(byte* screen, int screen_w, int screen_h, int x, int y, const byte* indices, int width, int height);
 
+/* Decode resource by type into Image (Phase-4 readiness) */
+Image* image_decode_resource_by_type(const char* type, const byte* data, int size, const Palette* palette);
+
 #endif /* FD2_IMAGE_H */

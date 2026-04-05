@@ -60,6 +60,8 @@ typedef struct {
     byte palette[PALETTE_SIZE][3];  // RGB调色板（8位）
     byte screen_buffer[SCREEN_WIDTH * SCREEN_HEIGHT];
     bool graphics_initialized;
+    // 渲染开关：是否开启地图索引渲染覆盖层（Phase 3/4）
+    bool render_map_overlay;
     
     // 文件系统
     DatFile dat_files[MAX_DAT_FILES];
