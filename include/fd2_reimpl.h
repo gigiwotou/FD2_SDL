@@ -60,8 +60,8 @@ typedef struct {
     byte palette[PALETTE_SIZE][3];  // RGB调色板（8位）
     byte screen_buffer[SCREEN_WIDTH * SCREEN_HEIGHT];
     bool graphics_initialized;
-    // 渲染开关：是否开启地图索引渲染覆盖层（Phase 3/4）
-    bool render_map_overlay;
+    // 渲染开关（运行时控制）
+    // 注意：Phase 3 Overlay 通过 render_map_overlay_runtime 控制
     
     // 文件系统
     DatFile dat_files[MAX_DAT_FILES];
@@ -69,6 +69,8 @@ typedef struct {
     
     // SDL渲染器（如果启用）
     void* sdl_renderer;  // 指向SDLRenderer结构
+    // 运行时地图索引渲染覆盖开关
+    bool render_map_overlay_runtime;
     
     // 游戏状态
     bool running;

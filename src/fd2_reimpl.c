@@ -8,12 +8,17 @@
 #include "fd2_sdl_renderer.h"
 #endif
 #include "../include/fd2_map.h"
+#ifdef USE_SDL
+#include <SDL2/SDL.h>
+#endif
 #include "../include/fd2_image.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static GameState game_state;
+// 运行时 overlay 开关（Phase 3/4） - 采用运行时变量，避免依赖头文件字段兼容问题
+static bool g_overlay_runtime = false;
 
 static bool parse_dat_resources_internal(DatFile* dat) {
     if (!dat->handle.data || dat->handle.size < 6) {
@@ -236,6 +241,8 @@ bool init_game(GameState* state) {
     }
     
     state->running = true;
+    // 运行时开关默认关闭，需手动开启以启用 Phase 3 Overlay
+    g_overlay_runtime = false;
     printf("游戏初始化完成\n");
     
     return true;
@@ -484,18 +491,20 @@ void render_game(GameState* state) {
     map_render_current_map_to_screen(state->screen_buffer, SCREEN_WIDTH, SCREEN_HEIGHT);
 #if ENABLE_MAP_INDEX_RENDER
     {
-        // Phase-3: render a small test overlay using direct index data for demonstration
-        // Simple 4x4 checkerboard of palette indices
-        const byte indices[16] = {
-            0, 1, 2, 3,
-            4, 5, 6, 7,
-            8, 9,10,11,
-            12,13,14,15
-        };
-        // render at (2,2) as a demonstration overlay
-        render_indices_to_screen(state->screen_buffer, SCREEN_WIDTH, SCREEN_HEIGHT, 2, 2, indices, 4, 4);
+        if (g_overlay_runtime) {
+            // Phase-3: render a small test overlay using direct index data for demonstration
+            // Simple 4x4 checkerboard of palette indices
+            const byte indices[16] = {
+                0, 1, 2, 3,
+                4, 5, 6, 7,
+                8, 9,10,11,
+                12,13,14,15
+            };
+            // render at (2,2) as a demonstration overlay
+            render_indices_to_screen(state->screen_buffer, SCREEN_WIDTH, SCREEN_HEIGHT, 2, 2, indices, 4, 4);
+        }
     }
-    #endif
+#endif
 #ifdef USE_SDL
     if (state->sdl_renderer) {
         sdl_render_frame(state);
