@@ -1,24 +1,58 @@
 /**
  * FD2 单位移动系统实现
- * 包含移动范围计算和A*寻路算法
+ * 基于IDA Pro逆向分析，支持地形移动cost
+ * 
+ * 地形cost系统 (与原版游戏一致):
+ * - 使用带权重BFS计算移动范围
+ * - 不同地形有不同的移动cost (平原=1, 森林=2, 山脉=3等)
+ * - 水和墙不可通行 (cost=99)
  */
 
 #include "fd2_movement.h"
 #include "fd2_unit.h"
+#include "fd2_resources.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static PathNode g_path_nodes[MAX_MAP_DIM][MAX_MAP_DIM];
 
+static const byte g_terrain_move_cost[16] = {
+    1,   // TERRAIN_PLAINS (平原)
+    2,   // TERRAIN_FOREST (森林)
+    3,   // TERRAIN_MOUNTAIN (山脉)
+    99,  // TERRAIN_WATER (水 - 不可通行)
+    99,  // TERRAIN_WALL (墙 - 不可通行)
+    1,   // TERRAIN_ROAD (道路)
+    1,   // TERRAIN_BRIDGE (桥梁)
+    1,   // TERRAIN_CASTLE (城堡)
+    1,   // TERRAIN_VILLAGE (村庄)
+    1,   // TERRAIN_PLAINS2
+    2,   // TERRAIN_FOREST2
+    3,   // TERRAIN_MOUNTAIN2
+    1,   // TERRAIN_DESERT
+    1,   // TERRAIN_SNOW
+    1,   // TERRAIN_LAVA
+    1    // TERRAIN_CAVE
+};
+
 static short heuristic(byte x1, byte y1, byte x2, byte y2) {
     return (short)(abs((int)x1 - (int)x2) + abs((int)y1 - (int)y2));
+}
+
+static byte get_terrain_cost(const MapData* map, byte x, byte y) {
+    if (!map || x >= map->width || y >= map->height) return 99;
+    int tile_id = map->tile_ids[y * map->width + x];
+    byte terrain = (byte)(tile_id & 0x0F);
+    if (terrain >= 16) terrain = 0;
+    return g_terrain_move_cost[terrain];
 }
 
 int movement_is_tile_passable(const MapData* map, byte x, byte y) {
     if (!map) return 0;
     if (x >= map->width || y >= map->height) return 0;
-    return 1;
+    byte cost = get_terrain_cost(map, x, y);
+    return cost < 99;
 }
 
 static void reset_path_nodes(byte width, byte height) {
@@ -76,13 +110,16 @@ int movement_calculate_move_range(const Unit* unit, const MapData* map, MoveRang
         QueueNode current = queue[queue_head];
         queue_head++;
         
-        if (current.g >= range->move_range) continue;
-        
         for (int dir = 0; dir < 4; dir++) {
             byte nx = current.x + dx[dir];
             byte ny = current.y + dy[dir];
             
             if (!movement_is_tile_passable(map, nx, ny)) continue;
+            
+            byte move_cost = get_terrain_cost(map, nx, ny);
+            short new_cost = current.g + move_cost;
+            
+            if (new_cost > range->move_range) continue;
             if (range->reachable[nx][ny]) continue;
             
             range->reachable[nx][ny] = true;
@@ -90,7 +127,7 @@ int movement_calculate_move_range(const Unit* unit, const MapData* map, MoveRang
             
             queue[queue_tail].x = nx;
             queue[queue_tail].y = ny;
-            queue[queue_tail].g = current.g + 1;
+            queue[queue_tail].g = new_cost;
             queue_tail++;
         }
     }
@@ -171,7 +208,8 @@ int movement_find_path(const MapData* map, byte start_x, byte start_y,
             if (!movement_is_tile_passable(map, nx, ny)) continue;
             if (g_path_nodes[nx][ny].in_closed_set) continue;
             
-            short new_g = g_path_nodes[cx][cy].g_cost + 1;
+            byte move_cost = get_terrain_cost(map, nx, ny);
+            short new_g = g_path_nodes[cx][cy].g_cost + move_cost;
             
             if (!g_path_nodes[nx][ny].in_open_set) {
                 g_path_nodes[nx][ny].g_cost = new_g;
